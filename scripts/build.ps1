@@ -77,7 +77,7 @@ Invoke-Native { & "$env:SystemRoot\System32\tar.exe" -a -c -f $archive -C $packa
 if ($LASTEXITCODE) { throw 'Unable to create the archive' }
 $hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
 "$hash  $name" | Set-Content -LiteralPath (Join-Path $out "$name.sha256") -Encoding ascii
-$installed = (Get-ChildItem -LiteralPath $package -Recurse -File | Measure-Object Length -Sum).Sum
+$installed = [long](Get-ChildItem -LiteralPath $package -Recurse -File | Measure-Object Length -Sum).Sum
 $commit = ((Invoke-Native { git -C $root rev-parse HEAD }) -join '').Trim()
 $signature = (($receipt | Select-String 'Signature is valid' | Select-Object -First 1).Line -replace '^\W+', '').Trim()
 # Sol's pin script reads this file (id, file, sha256, size, installedSize).
