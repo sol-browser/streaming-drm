@@ -1,0 +1,89 @@
+# Builds, VMP-signs and publishes one Streaming DRM release.
+# Manual only. The evs-signing environment holds the castLabs EVS account and
+# requires a reviewer's approval before a run can read it; nothing runs on pull
+# requests, so code from forks never reaches the secrets.
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      revision:
+        description: Package revision (the id becomes <ECS version>-<revision>)
+        required: true
+        type: number
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-2025
+    environment: evs-signing
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Check that the release is new
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REVISION: ${{ inputs.revision }}
+        run: |
+          $lock = Get-Content ecs.lock.json -Raw | ConvertFrom-Json
+          $id = "$($lock.version)-$env:REVISION"
+          gh release view $id --repo $env:GITHUB_REPOSITORY 2>$null
+          if ($LASTEXITCODE -eq 0) { throw "Release $id already exists. Releases are never replaced: Sol builds pin them." }
+          exit 0
+
+      - name: Install castLabs EVS
+        shell: pwsh
+        run: |
+          $lock = Get-Content ecs.lock.json -Raw | ConvertFrom-Json
+          python -m pip install --disable-pip-version-check "castlabs-evs==$($lock.tools.'castlabs-evs')"
+          if ($LASTEXITCODE) { throw 'Unable to install castlabs-evs' }
+
+      - name: Sign in to EVS
+        shell: pwsh
+        env:
+          EVS_ACCOUNT_NAME: ${{ secrets.EVS_ACCOUNT_NAME }}
+          EVS_PASSWD: ${{ secrets.EVS_PASSWD }}
+        run: |
+          if (!$env:EVS_ACCOUNT_NAME -or !$env:EVS_PASSWD) { throw 'EVS_ACCOUNT_NAME and EVS_PASSWD are not set in the evs-signing environment' }
+          python -m castlabs_evs.account -n reauth -A "$env:EVS_ACCOUNT_NAME" -P "$env:EVS_PASSWD"
+          if ($LASTEXITCODE) { throw 'EVS sign-in failed' }
+
+      - name: Build and sign
+        shell: pwsh
+        run: ./scripts/build.ps1 -Revision ${{ inputs.revision }} -Sign
+
+      - name: Publish
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $release = Get-Content out/release.json -Raw | ConvertFrom-Json
+          gh release create $release.id --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA `
+            --title "Streaming DRM $($release.id)" --notes-file out/notes.md `
+            "out/$($release.file)" "out/$($release.file).sha256" out/release.json
+          if ($LASTEXITCODE) { throw 'Unable to publish the release' }
+
+      - name: Forget the EVS session
+        if: always()
+        shell: pwsh
+        run: |
+          $config = Join-Path $HOME '.config/evs'
+          if (Test-Path $config) { Remove-Item $config -Recurse -Force }
